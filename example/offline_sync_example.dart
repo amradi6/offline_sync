@@ -1,51 +1,83 @@
 import 'package:offline_sync/offline_sync.dart';
 
 class FakeApiAdapter extends SyncAdapter {
+  int _callCount = 0;
+
   @override
   Future<void> execute(SyncOperation operation) async {
-    await Future.delayed(const Duration(milliseconds: 300));
-    print(
-      '  synced: [${operation.type.name}] '
-      '${operation.collection}/${operation.entityId}',
-    );
+    await Future.delayed(const Duration(milliseconds: 200));
+    _callCount++;
+
+    // Simulate a conflict on the 2nd call
+    if (_callCount == 2) {
+      throw SyncConflictException(
+        message: 'Record was modified on server',
+        serverUpdatedAt: DateTime.now().subtract(const Duration(hours: 1)),
+      );
+    }
+
+    // Simulate a network failure on the 3rd call
+    if (_callCount == 3) {
+      throw Exception('Network error');
+    }
+
+    print('  synced [${operation.type.name}] '
+        '${operation.collection}/${operation.entityId}');
   }
 }
 
 void main() async {
-  final queue = SyncQueue();
-  final adapter = FakeApiAdapter();
-  final monitor = AlwaysOnlineMonitor();
-  final engine = SyncEngine(queue: queue, adapter: adapter, monitor: monitor);
+  final sync = OfflineSync(
+    adapter: FakeApiAdapter(),
+    config: SyncConfig(
+      maxRetries: 2,
+      retryDelay: Duration.zero,
+      conflictStrategy: SyncConflictStrategy.lastWriteWins,
+    ),
+  );
 
-  engine.onStateChanged.listen((state) {
-    print('engine state → ${state.name}  (${engine.pendingCount} pending)');
+  sync.onStateChanged.listen((state) {
+    print('state → ${state.name}  (${sync.pendingCount} pending)');
   });
 
-  queue.add(
-    SyncOperation.create(
-      collection: 'users',
-      entityId: 'user-1',
-      payload: {'name': 'Alice', 'email': 'alice@example.com'},
-    ),
+  sync.onConflict.listen((conflict) {
+    print('conflict → ${conflict.message}');
+  });
+
+  sync.onFailedAttempt.listen((op) {
+    print('failed attempt → ${op.collection}/${op.entityId} '
+        '(retry ${op.retries})');
+  });
+
+  sync.onDeadLetter.listen((op) {
+    print('dead letter → ${op.collection}/${op.entityId} gave up');
+  });
+
+  // Using the facade directly — no SyncOperation boilerplate
+  sync.create(
+    collection: 'users',
+    entityId: 'user-1',
+    payload: {'name': 'Alice'},
+    priority: 5,
   );
 
-  queue.add(
-    SyncOperation.update(
-      collection: 'users',
-      entityId: 'user-2',
-      payload: {'name': 'Bob Updated'},
-      priority: 10,
-    ),
+  sync.update(
+    collection: 'orders',
+    entityId: 'order-42',
+    payload: {'status': 'shipped'},
   );
 
-  queue.add(SyncOperation.delete(collection: 'orders', entityId: 'order-99'));
+  sync.delete(
+    collection: 'sessions',
+    entityId: 'session-99',
+  );
 
-  print('queued ${engine.pendingCount} operations');
-  print('starting engine...\n');
+  print('queued ${sync.pendingCount} operations\n');
 
-  await engine.start();
-  await Future.delayed(const Duration(seconds: 2));
-  await engine.stop();
+  await sync.start();
+  await Future.delayed(const Duration(seconds: 3));
+  await sync.stop();
 
-  print('\ndone. remaining in queue: ${engine.pendingCount}');
+  print('\nfinal pending: ${sync.pendingCount}');
+  print('dead letters: ${sync.deadLetterQueue.length}');
 }

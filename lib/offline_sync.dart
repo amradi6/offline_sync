@@ -4,3 +4,8 @@ export 'src/sync_adapter.dart';
 export 'src/connectivity_monitor.dart';
 export 'src/always_online_monitor.dart';
 export 'src/sync_engine.dart';
+export 'src/sync_config.dart';
+export 'src/sync_conflict_strategy.dart';
+export 'src/storage/storage_adapter.dart';
+export 'src/storage/in_memory_storage_adapter.dart';
+export 'src/offline_sync.dart';
