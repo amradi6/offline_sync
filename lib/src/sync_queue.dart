@@ -13,8 +13,13 @@ class SyncQueue {
   /// Must be called once before using the queue.
   Future<void> initialize() async => _ensureLoaded();
 
-  Future<void> _ensureLoaded() async {
-    if (_loaded) return;
+  Future<void>? _initFuture;
+
+  Future<void> _ensureLoaded() {
+    return _initFuture ??= _doLoad();
+  }
+
+  Future<void> _doLoad() async {
     final persisted = await _storage.load();
     _operations.addAll(persisted);
     _loaded = true;
