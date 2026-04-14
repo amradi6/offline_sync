@@ -1,5 +1,3 @@
-// lib/src/sync_engine.dart
-
 import 'dart:async';
 import 'models/sync_operation.dart';
 import 'sync_queue.dart';
@@ -19,6 +17,7 @@ class SyncEngine {
   final List<SyncOperation> _deadLetterQueue = [];
   SyncEngineState _state = SyncEngineState.idle;
   bool _started = false;
+  bool _stopped = false;
 
   StreamSubscription<bool>? _connectivitySubscription;
 
@@ -65,7 +64,9 @@ class SyncEngine {
 
   void enqueue(SyncOperation operation) {
     _queue.add(operation).then((_) {
-      if (_started && _state == SyncEngineState.idle && _monitor.currentStatus) {
+      if (_started &&
+          _state == SyncEngineState.idle &&
+          _monitor.currentStatus) {
         _flush();
       }
     });
@@ -80,6 +81,7 @@ class SyncEngine {
   }
 
   Future<void> stop() async {
+    _stopped = true;
     await _connectivitySubscription?.cancel();
     await _monitor.dispose();
     _setState(SyncEngineState.stopped);
@@ -90,28 +92,32 @@ class SyncEngine {
   }
 
   Future<void> _flush() async {
+    if (_stopped) return; // ← guard: don't flush after stop()
     if (_state == SyncEngineState.syncing || _queue.isEmpty) return;
     _setState(SyncEngineState.syncing);
     try {
       final ops = _queue.getAll();
       for (final op in ops) {
+        if (_stopped) break; // ← bail mid-flush if stop() was called
         if (_queue.getAll().any((o) => o.id == op.id)) {
           await _processOperation(op);
         }
       }
     } finally {
-      _setState(SyncEngineState.idle);
+      // Only transition to idle if we haven't been stopped.
+      if (!_stopped) _setState(SyncEngineState.idle);
     }
   }
 
   Future<void> _processOperation(SyncOperation op) async {
+    if (_stopped) return;
     await _queue.update(op.copyWith(status: SyncStatus.syncing));
 
     try {
       await _adapter.execute(op);
-      await _queue.remove(op.id); // awaited ← bug 2 fix
+      await _queue.remove(op.id);
     } on SyncConflictException catch (conflict) {
-      _conflictController.add(conflict);
+      if (!_conflictController.isClosed) _conflictController.add(conflict);
       await _handleConflict(op, conflict);
     } catch (_) {
       await _handleFailure(op);
@@ -143,16 +149,20 @@ class SyncEngine {
       retries: op.retries + 1,
     );
 
-    _failedAttemptController.add(updatedOp);
+    if (!_failedAttemptController.isClosed) {
+      _failedAttemptController.add(updatedOp);
+    }
 
     if (updatedOp.retries >= _config.maxRetries) {
-      await _queue.remove(op.id); // awaited ← bug 3 fix
+      await _queue.remove(op.id);
       _deadLetterQueue.add(updatedOp);
-      _deadLetterController.add(updatedOp);
+      if (!_deadLetterController.isClosed) {
+        _deadLetterController.add(updatedOp);
+      }
     } else {
       await _queue.update(updatedOp);
       Future.delayed(_config.retryDelay, () {
-        if (_state != SyncEngineState.stopped && _monitor.currentStatus) {
+        if (!_stopped && _monitor.currentStatus) {
           _flush();
         }
       });
@@ -161,6 +171,8 @@ class SyncEngine {
 
   void _setState(SyncEngineState newState) {
     _state = newState;
-    _stateController.add(newState);
+    if (!_stateController.isClosed) {
+      _stateController.add(newState);
+    }
   }
 }
